@@ -147,12 +147,22 @@ class DistributedHashMap {
         }
 };
 
+
+bool test_conditions(std::vector<double>w_i, std::vector<double>h_j){
+    bool result = false;
+    for(int i =0; i<w_i.size(); i++){
+        result = result || abs(w_i[i])>10 || abs(h_j[i])>10;
+    }
+    return result;
+}
+
 int main(int argc, char **argv) {
     upcxx::init();
-    double lambda = 0.05; // regularization
+    double lambda = 0.5; // regularization
     double decay_rate = 0.012;
-    double learning_rate = 0.0001;
+    double learning_rate = 0.001;
     int n_retries = 40; // number of circulating a (i, j) in a machine
+    double epsilon = 0.0000000001; // stop threshold
     // for netflix
     // int m = 2649429;
     // int n = 17770;
@@ -160,16 +170,22 @@ int main(int argc, char **argv) {
     // char delimiter = '\t'; 
 
     // for ml-20m
-    int m = 138493;
-    int n = 27278;
-    int k = 100;
-    char delimiter = ','; 
+    // int m = 138493;
+    // int n = 27278;
+    // int k = 100;
+    // char delimiter = ','; 
    
     //for ml-100k
-    // int m = 943;
-    // int n = 1682;
-    // int k = 20;
-    // char delimiter = '\t';
+    int m = 943;
+    int n = 1682;
+    int k = 20;
+    char delimiter = '\t';
+
+    // for ml-10m
+    // int m = 71567;
+    // int n = 10681;
+    // int k = 100;
+    // char delimiter = ','; 
 
     int block_size = m/(upcxx::world().rank_n()-1);
     int n_local_members = upcxx::local_team().rank_n();
@@ -179,11 +195,13 @@ int main(int argc, char **argv) {
 
     //const std::string train_dataset_path = "/home/hpcc/cloud/nomad/netflix_prize/netflix_data_" + std::to_string(upcxx::rank_me()) + ".txt";
     //const std::string train_dataset_path = "/home/hpcc/cloud/nomad/ml-20m/ratings_" + std::to_string(upcxx::rank_me()) + ".csv";
-    //const std::string train_dataset_path = "/home/hpcc/cloud/nomad/ml-100k/u1_0.base";
+  //  const std::string train_dataset_path = "/home/hpcc/cloud/nomad/ml-100k/u1_" + std::to_string(upcxx::rank_me()) + ".base";
+    // const std::string train_dataset_path = "/home/hpcc/cloud/nomad/ml-10m/ratings_" + std::to_string(upcxx::rank_me()) + ".txt";
 
-    const std::string train_dataset_path = "/home/picarib/Downloads/nomad/ml-20m/ratings_" + std::to_string(upcxx::rank_me()) + ".csv";
-    // const std::string train_dataset_path = "/home/picarib/Downloads/nomad/ml-100k/u1_" + std::to_string(upcxx::rank_me()) + ".base";
+  //  const std::string train_dataset_path = "/home/picarib/Downloads/NOMAD-UPCXX/ml-20m/ratings_" + std::to_string(upcxx::rank_me()) + ".csv";
+    const std::string train_dataset_path = "/home/picarib/Downloads/NOMAD-UPCXX/ml-100k/u1_" + std::to_string(upcxx::rank_me()) + ".base";
     // const std::string train_dataset_path = "/home/picarib/Downloads/nomad/netflix_prize/netflix_data_" + std::to_string(upcxx::rank_me()) + ".txt";
+    //const std::string train_dataset_path = "/home/picarib/Downloads/NOMAD-UPCXX/ml-10m/ratings_" + std::to_string(upcxx::rank_me()) + ".txt";
 
     default_random_engine generator;
     uniform_real_distribution<double> real_distribution(0.0,1.0/sqrt(k));
@@ -222,7 +240,7 @@ int main(int argc, char **argv) {
         }
     }
         // read train dataset to build the matrix A.
-    cout << "  READING TRAINING DATASET... \n";
+    cout << "  WORER " <<  upcxx::rank_me() << " IS READING THE TRAINING DATASET... \n";
     fstream newfile;
     newfile.open(train_dataset_path, ios::in); //open a file to perform read operation using file object
 
@@ -246,7 +264,7 @@ int main(int argc, char **argv) {
                         break;
                     }
                     case 2:{		
-                        rating = stod(line_tk) * 1.0 / 5.0;
+                        rating = stoi(line_tk) * 1.0; // stoi for ml-10k, netflix, ml-10m, and stod for ml-20m
                         break;
                     }	
                     default:{
@@ -255,7 +273,7 @@ int main(int argc, char **argv) {
                 }
                 e_idx++;		
             }
-            if (e_idx == 4){
+            if (e_idx == 4){ //4 for ml-10k and 3 for others    
                 upcxx::future<> fut = A.insert_remote(user_index, item_index, rating);
                 fut_full = upcxx::when_all(fut_full, fut);
             }
@@ -265,46 +283,9 @@ int main(int argc, char **argv) {
     }
     upcxx::barrier();
 
-        // cout << "  READING TESTING DATASET... \n";
-        // newfile.open(test_dataset_path, ios::in); //open a file to perform read operation using file object
-        // if (newfile.is_open()){ //checking whether the file is open
-        //     string tp;
-        //     while(getline(newfile, tp)){ //read data from file object and put it into string.
-        //         string line_tk;
-        //         int e_idx = 0;
-        //         std::stringstream stream_tp(tp);    
-        //         int user_index, item_index;
-        //         double rating;
-        //         while(getline(stream_tp, line_tk,'\t')){
-        //             switch (e_idx) {
-        //                 case 0:{
-        //                     user_index = stoi(line_tk) - 1;
-        //                     break; 
-        //                 } 
-        //                 case 1:{
-        //                     item_index = stoi(line_tk) - 1;
-        //                     break;
-        //                 }
-        //                 case 2:{        
-        //                     rating = stoi(line_tk) * 1.0 / 5.0;
-        //                     break;
-        //                 }   
-        //                 default:{
-        //                     break;                        
-        //                 }   
-        //             }
-        //             e_idx++;        
-        //         }
-        //         if (e_idx == 4){
-        //             A_test.insert_remote(user_index, item_index, rating).wait();
-        //         }
-        //     }
-        //     newfile.close(); //close the file object.
-        // }
-
-    if(upcxx::rank_me() == 0){
-        A.print_map();
-    }
+    // if(upcxx::rank_me() == 0){
+    //     A.print_map();
+    // }
     
     // Init for permature at local node
     upcxx::global_ptr<double> perm_; 
@@ -337,14 +318,14 @@ int main(int argc, char **argv) {
     zero_pair.first = 0.0;
     zero_pair.second = 0;
     upcxx::dist_object<std::pair<double, long>> distributed_losses(zero_pair); /// save <total loss and loss count>
-    
+    upcxx::dist_object<bool> stop_signal = false;
+
+
     if(upcxx::world().rank_me() != 0){
         upcxx::future<> fut_batch = upcxx::make_future();
-        cout << "START RUN";
         int count = 0;
-        int fail_count = 0;
         int _t = 0;
-        while (true){
+        while (!(*stop_signal)){
             if(!d_queue.isEmpty()){
                 ColumnData item_info = d_queue.pop_item();
                 int j = item_info.item_index;   
@@ -364,19 +345,16 @@ int main(int argc, char **argv) {
                                 (1.0 + decay_rate * pow(t  + 1, 1.5)); // this is different from the source code of authors.
                     // note: have to index from global user_index (i) -> local user_index (i%block_size)
                     std::vector<double> w_i = l_w[i]; // vector size: (k, 1); 
-                    double cur_loss = Aij - w_i * h_j;
+                    double cur_loss = w_i * h_j - Aij;
+
+                    std::vector<double> backUp_w = w_i;
+                    std::vector<double> backUp_h = h_j;
+
                     l_w[i] = w_i - step_size * (cur_loss * h_j + lambda * w_i);
                     h_j = h_j - step_size * (cur_loss * w_i + lambda * h_j);
 
                     current_square_loss += pow(cur_loss, 2);
                     current_loss_count += 1;
-                    if (h_j[0] != h_j[0] || w_i[0] != w_i[0] || l_w[i][0] != l_w[i][0]){
-                        fail_count = count;
-                    } else{
-                        if (t>=10){
-                            // cout << t << " Aij: " << Aij << " " << h_j[0] << " " << w_i[0] << " " << l_w[i][0] << "\n";
-                        }                        
-                    }
                 }
                 (*distributed_losses).first += current_square_loss;
                 (*distributed_losses).second += current_loss_count;
@@ -419,7 +397,7 @@ int main(int argc, char **argv) {
                     fut_batch = upcxx::when_all(fut_batch, fut);
                 }
             } 
-            if (_t % 10 == 0){
+            if (count % 100000 == 0){
                 fut_batch.wait();
                 upcxx::progress();
             }
@@ -427,10 +405,12 @@ int main(int argc, char **argv) {
         }
     } else{
         cout << "ROOT NODE IS PULLING LOSSES.....\n";
+        double previous_loss = 0.0;
         while (true){
-            sleep(1);
+            sleep(5);
             double total_loss = 0.0;
             long total_count = 0;
+
             for(int i=1; i<upcxx::rank_n(); i++){
                 std::pair<double, int> tmp = distributed_losses.fetch(i).wait();
                 total_count += tmp.second;
@@ -438,6 +418,18 @@ int main(int argc, char **argv) {
             }
             total_loss = (total_count > 0) ? sqrt(total_loss/total_count) : 0;
             cout << "TRAINING LOSS: " << total_loss << "\n";
+
+            if (abs(total_loss - previous_loss) < epsilon){
+                /// send stop signal
+                for(int i=1; i<upcxx::rank_n(); i++){
+                    upcxx::rpc(i, [](upcxx::dist_object<bool> &d_signal){
+                        *(d_signal) = true;
+                    }, stop_signal).wait();  
+                }
+                cout << "DONE\n";
+                break;
+            }
+            previous_loss = total_loss;
         }
     }
     upcxx::finalize();
