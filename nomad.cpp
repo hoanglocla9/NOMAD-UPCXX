@@ -12,7 +12,7 @@
     #include <unistd.h>
     #include <tbb/concurrent_queue.h>
     #include <tbb/concurrent_priority_queue.h>
-
+    #include <time.h>
     using namespace std;
     template <typename T> std::vector<T> operator+(const std::vector<T>& a, const std::vector<T>& b){
         UPCXX_ASSERT(a.size() == b.size());
@@ -156,12 +156,15 @@
     }
 
     int main(int argc, char **argv) {
+        clock_t start, end;
+        start = clock();
         upcxx::init();
-        double lambda = 0.05; // regularization
-        double decay_rate = 0.012;
-        double learning_rate = 0.0001;
-        int n_retries = 1; // number of circulating a (i, j) in a machine
-        double epsilon = 0.0000001; // stop threshold
+        const double lambda = 0.05; // regularization
+        const double decay_rate = 0.012;
+        const double learning_rate = 0.001;
+        const int n_retries = 1; // number of circulating a (i, j) in a machine
+        const double epsilon = 0.0000001; // stop threshold
+        const int MAX_UPDATES = 300000/(upcxx::rank_n()-1);
         // for netflix
         // int m = 2649429;
         // int n = 17770;
@@ -282,9 +285,9 @@
         }
         upcxx::barrier();
 
-        // if(upcxx::rank_me() == 0){
-        //     A.print_map();
-        // }
+        if(upcxx::rank_me() == 0){
+            A.print_map();
+        }
         
         // Init for permature at local node
         upcxx::global_ptr<double> perm_; 
@@ -313,19 +316,15 @@
         } 
         upcxx::barrier();
         // Init for global loss
-        std::pair<double, long>  zero_pair;
-        zero_pair.first = 0.0;
-        zero_pair.second = 0;
-        upcxx::dist_object<std::pair<double, long>> distributed_losses(zero_pair); /// save <total loss and loss count>
-        upcxx::dist_object<bool> stop_signal = false;
-        upcxx::dist_object<int> training_steps = 0;
+        upcxx::dist_object<std::vector<std::tuple<double, long, long>>> distributed_losses({}); /// save <total loss and loss count>
+        
 
         if(upcxx::world().rank_me() != 0){
             upcxx::future<> fut_batch = upcxx::make_future();
-            int num_updates = 0;
             int num_failures = 0;
+            int num_updates = 0;
             int _t = 0;
-            while (!(*stop_signal)){
+            while (true){
                 ColumnData item_info;
                 if(d_queue.try_pop(item_info)){
                     int j = item_info.item_index;   
@@ -353,9 +352,12 @@
                         current_square_loss += pow(cur_loss, 2);
                         current_loss_count += 1;
                     }
-                    (*distributed_losses).first += current_square_loss;
-                    (*distributed_losses).second += current_loss_count;
-
+                    std::tuple<double, long, long> loss_tuple(
+                        current_square_loss,
+                        current_loss_count,
+                        num_updates
+                    );
+                    (*distributed_losses).push_back(loss_tuple);
                     int next_q=-1;
                     ColumnData column_data;
                     column_data.item_index = j;
@@ -402,66 +404,60 @@
                         }
                         // column_data.perm_index = upcxx::rank_me(); 
                     }
-                    // if (next_q == 0){
-                    //     cout << "FUCK HEAR : " << item_perm_index << "\n";
-                    //     for (int i=0; i<n_retries; i++){
-                    //         for (int j=0; j<n_local_members; j++){
-                    //             cout << local_perm_[i*n_local_members + j] << " ";
-                    //         }
-                    //     }
-                    //     cout << "\n=================================\n";
-                    // }
                     if(next_q != -1){
                         // d_queue.push_item(next_q, column_data).wait();
                         upcxx::future<> fut = d_queue.push_item(next_q, column_data);
                         fut_batch = upcxx::when_all(fut_batch, fut);
                     }
+                    if(num_updates >= MAX_UPDATES){
+                        upcxx::progress();
+                        break;
+                    }
                     num_updates++;
                 } else{
                     num_failures++;
                 } 
-                if ((num_failures + num_updates)  % 10 == 0){ // (num_failures + num_updates) % 10 == 0
-                    *training_steps = num_updates;
-                    // fut_batch.wait();
-                    upcxx::progress();
+                upcxx::progress();
+                // if ((num_failures + num_updates)  % 10000 == 0){ // (num_failures + num_updates) % 10 == 0
+                //     // fut_batch.wait();
+                //     
+                // }
+            }
+        } 
+
+        upcxx::barrier();
+        if(upcxx::rank_me() == 0){
+            int total_count = 0;
+            double total_loss = 0.0;
+            int t = 0;
+            std::vector<std::pair<double,long>> accumulated_losses;
+            accumulated_losses.resize(MAX_UPDATES * (upcxx::rank_n()-1));
+            for(int i=0; i<upcxx::rank_n()-1; i++){
+                std::vector<std::tuple<double, long, long>> loss_tuple_list = distributed_losses.fetch(i+1).wait();
+                for(std::tuple<double, long, long> loss_tuple : loss_tuple_list){
+                    int update_idx = std::get<2>(loss_tuple); 
+                    if (update_idx >= MAX_UPDATES){
+                        continue;
+                    }
+                    accumulated_losses[update_idx * (upcxx::rank_n()-1) + i].second += std::get<1>(loss_tuple);
+                    accumulated_losses[update_idx * (upcxx::rank_n()-1) + i].first += std::get<0>(loss_tuple);
                 }
             }
-        } else{
-            cout << "ROOT NODE IS PULLING LOSSES.....\n";
-            double previous_loss = 0.0;
+            // Compute squared losses
+            int step_idx = 0;
             std::ofstream outfile;
-            outfile.open("ml-10m.txt", std::ios_base::app);
-           // 
-            while (true){
-                sleep(1);
-                double total_loss = 0.0;
-                long total_count = 0;
-                int t = 0;
-                int previous_t = -1;
-                for(int i=1; i<upcxx::rank_n(); i++){
-                    std::pair<double, long> tmp = distributed_losses.fetch(i).wait();
-                    int tmp_t = training_steps.fetch(i).wait();
-                    total_count += tmp.second;
-                    total_loss += tmp.first;
-                    t += tmp_t;
-                }
-                total_loss = (total_count > 0) ? sqrt(total_loss/total_count) : 0;
-                cout << "T= " << t << " TRAINING LOSS: " << total_loss << "\n";
-                outfile << t << "\t" << total_loss << "\n";
-                if (abs(total_loss - previous_loss) < epsilon){ //|| t == previous_t  abs(total_loss - previous_loss) < epsilon 
-                    /// send stop signal
-                    for(int i=1; i<upcxx::rank_n(); i++){
-                        upcxx::rpc(i, [](upcxx::dist_object<bool> &d_signal){
-                            *(d_signal) = true;
-                        }, stop_signal).wait();  
-                    }
-                    cout << "DONE\n";
-                    break;
-                }
-                previous_loss = total_loss;
-                previous_t = t;
+            outfile.open("result-v1.txt", std::ios_base::app);
+            double accumulated_loss = 0.0;
+            long accumulate_loss_count = 0;
+            for(std::pair<double, long> loss_info: accumulated_losses){
+                accumulated_loss += loss_info.first;
+                accumulate_loss_count += loss_info.second;
+                double square_loss = (accumulate_loss_count > 0) ? sqrt(accumulated_loss/accumulate_loss_count) : 0;
+                outfile << step_idx << "\t" << square_loss << "\n";
+                step_idx++;
             }
         }
         upcxx::finalize();
+        cout << "TOTAL RUNNING TIME: " << double(end - start) / double(CLOCKS_PER_SEC) << "\n";
         return 0;
     }

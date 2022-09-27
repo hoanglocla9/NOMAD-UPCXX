@@ -13,6 +13,7 @@
     #include <tbb/concurrent_queue.h>
     #include <tbb/concurrent_priority_queue.h>
     #include <thread>
+    #include <time.h>
     using namespace std;
 
     template <typename T> std::vector<T> operator+(const std::vector<T>& a, const std::vector<T>& b){
@@ -137,15 +138,18 @@
     };
 
     int main(int argc, char **argv) {
+        clock_t start, end;
+        start = clock();
         upcxx::init();
         const double lambda = 0.05; // regularization
         const double decay_rate = 0.012;
         const double learning_rate = 0.0001;
         const int n_retries = 1; // number of circulating a (i, j) in a machine
         const double epsilon = 0.0000001; // stop threshold
+
         const int UNITS_PER_MSG = 100;
-        const int n_threads_per_machines = 3;
-        const int MAX_UPDATES = 100000/upcxx::rank_n();
+        const int n_threads_per_machines = 5;
+        const int MAX_UPDATES = 300000/upcxx::rank_n(); // Assume that this division is even
         std::thread *computing_threads[n_threads_per_machines];
         std::atomic<int> num_updates(0) ;
         std::atomic<int> num_failures(0);
@@ -222,7 +226,7 @@
         std::vector<RatingHashMap> A_list;
         A_list.resize(n_threads_per_machines);
         std::function<void(int)> read_dataset_func = [&](int thread_id)->void{
-            const std::string train_dataset_path = "/home/hpcc/cloud/nomad/ml-100k/u1_" + std::to_string(upcxx::rank_me() * n_threads_per_machines + thread_id) + ".base";
+            const std::string train_dataset_path = "/home/picarib/Downloads/NOMAD-UPCXX/ml-100k/u1_" + std::to_string(upcxx::rank_me() * n_threads_per_machines + thread_id) + ".base";
             fstream newfile;
             newfile.open(train_dataset_path, ios::in); //open a file to perform read operation using file object
             
@@ -362,9 +366,10 @@
         }
         for (int tid=0; tid<n_threads_per_machines; tid++) {
             computing_threads[tid]->join();
-            A_list[tid].print_map();
+            // A_list[tid].print_map();
         }
 
+        upcxx::barrier();
         for (int tid=0; tid<n_threads_per_machines; tid++) {
             computing_threads[tid] = new thread(run_train_func, tid);
         }
@@ -388,7 +393,7 @@
                         }
                         if (next_rank >= 0){
                             int randomized_thread_id = local_int_distribution(generator);
-                            job_queues.push_remote(next_rank, randomized_thread_id, item_info).wait();
+                            job_queues.push_remote(next_rank, randomized_thread_id, item_info);
                         }
                     } else{
                         sched_yield();
@@ -445,12 +450,11 @@
                             accumulated_losses[update_idx * upcxx::rank_n() + i].first += std::get<0>(loss_tuple);
                         }
                     }
-
                 }
                 // Compute squared losses
                 int step_idx = 0;
                 std::ofstream outfile;
-                outfile.open("result.txt", std::ios_base::app);
+                outfile.open("result-v2.txt", std::ios_base::app);
                 double accumulated_loss = 0.0;
                 long accumulate_loss_count = 0;
                 for(std::pair<double, long> loss_info: accumulated_losses){
@@ -462,6 +466,7 @@
                 }
         }
         upcxx::finalize();
-
+        end = clock();
+        cout << "TOTAL RUNNING TIME: " << double(end - start) / double(CLOCKS_PER_SEC) << "\n";
         return 0;
     }
