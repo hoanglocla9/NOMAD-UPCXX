@@ -123,7 +123,8 @@
             };
             upcxx::future<>  push_remote(const int &next_rank, const int &thread_id, const ColumnData & column_data ){ // 
                 return upcxx::rpc(next_rank, [](d_queues_list &l_job_queues_list, const int &t_id, const ColumnData & column_data) // 
-                    {
+                    {   
+                        // cout << "WORKER " <<  upcxx::rank_me() << " Receive new data!\n";
                         (*l_job_queues_list)[t_id].push(column_data);
                     }, local_job_queues_list, thread_id, column_data); //                       
             }
@@ -144,7 +145,7 @@
         const double epsilon = 0.0000001; // stop threshold
         const int UNITS_PER_MSG = 100;
         const int n_threads_per_machines = 3;
-        const int MAX_UPDATES = 1000;
+        const int MAX_UPDATES = 100000/upcxx::rank_n();
         std::thread *computing_threads[n_threads_per_machines];
         std::atomic<int> num_updates(0) ;
         std::atomic<int> num_failures(0);
@@ -153,7 +154,6 @@
         std::atomic<bool> waiting_signal(false);
         upcxx::dist_object<std::vector<std::vector<std::tuple<double, long, long>>>> distributed_losses({}); /// save <total loss and loss count>
         (*distributed_losses).resize(n_threads_per_machines);
-
         upcxx::dist_object<std::vector<int>> training_steps({});
         (*training_steps).resize(n_threads_per_machines);
         // for netflix
@@ -380,15 +380,15 @@
                         while(true){
                             next_rank = global_int_distribution(generator);
                             if (next_rank != upcxx::rank_me()) break;
-                            if(retries >= 500){
+                            if(retries >= 50){
                                 next_rank = -1;  
                                 break;
                             }
                             retries++;
                         }
-                        if (next_rank > 0){
+                        if (next_rank >= 0){
                             int randomized_thread_id = local_int_distribution(generator);
-                            job_queues.push_remote(next_rank, randomized_thread_id, item_info);
+                            job_queues.push_remote(next_rank, randomized_thread_id, item_info).wait();
                         }
                     } else{
                         sched_yield();
@@ -432,7 +432,7 @@
                 double total_loss = 0.0;
                 int t = 0;
                 std::vector<std::pair<double,long>> accumulated_losses;
-                accumulated_losses.resize(MAX_UPDATES);
+                accumulated_losses.resize(MAX_UPDATES * upcxx::rank_n());
                 for(int i=0; i<upcxx::rank_n(); i++){
                     std::vector<std::vector<std::tuple<double, long, long>>> tmp_list = distributed_losses.fetch(i).wait();
                     for(std::vector<std::tuple<double, long, long>> loss_tuple_list : tmp_list){
@@ -441,10 +441,11 @@
                             if (update_idx >= MAX_UPDATES){
                                 continue;
                             }
-                            accumulated_losses[update_idx].second += std::get<1>(loss_tuple);
-                            accumulated_losses[update_idx].first += std::get<0>(loss_tuple);
+                            accumulated_losses[update_idx * upcxx::rank_n() + i].second += std::get<1>(loss_tuple);
+                            accumulated_losses[update_idx * upcxx::rank_n() + i].first += std::get<0>(loss_tuple);
                         }
                     }
+
                 }
                 // Compute squared losses
                 int step_idx = 0;
