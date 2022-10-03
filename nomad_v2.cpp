@@ -147,13 +147,6 @@
     };
 
 
-    bool test_conditions(std::vector<double>w_i, std::vector<double>h_j){
-        bool result = false;
-        for(int i =0; i<w_i.size(); i++){
-            result = result || abs(w_i[i])>10 || abs(h_j[i])>10;
-        }
-        return result;
-    }
 
     int main(int argc, char **argv) {
         upcxx::init();
@@ -162,7 +155,7 @@
         double learning_rate = 0.0001;
         int n_retries = 1; // number of circulating a (i, j) in a machine
         double epsilon = 0.0000001; // stop threshold
-        const int MAX_UPDATES = 10000000;
+        const int MAX_UPDATES = 30000;
         // for netflix
         // int m = 2649429;
         // int n = 17770;

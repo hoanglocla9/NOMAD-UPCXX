@@ -59,20 +59,30 @@ public:
 };
 class RatingHashMap {       
 private:
-    using rating_map = std::unordered_map<int, std::unordered_map<int, std::pair<double, int>>>; // store <item_id, <user_id, <rating, t>>>>
-    rating_map local_map;
+    using rating_map = upcxx::dist_object<std::vector<std::unordered_map<int, std::unordered_map<int, std::pair<double, int>>>>>; // store <item_id, <user_id, <rating, t>>>>
+    rating_map local_map_list;
+    int n_threads_per_machines;
+    std::pair<int, int> get_target_rank(const int &user_index) {
+        int machine_id = user_index % upcxx::world().rank_n();
+        int thread_id = (user_index/ upcxx::world().rank_n()) % n_threads_per_machines;
+        return make_pair(machine_id, thread_id);
+    }
 
 public:    
-RatingHashMap () : local_map({}){};
-    void insert(const int &user_index, const int &item_index, const double &rating){ // 
-        auto it = local_map.find(item_index);
-        if (it == local_map.end()){	
+RatingHashMap (int _n_threads_per_machines) : local_map_list({}){
+    n_threads_per_machines = _n_threads_per_machines;
+    (*local_map_list).resize(n_threads_per_machines);
+};
+
+    void insert_local(const int &thread_id, const int &user_index, const int &item_index, const double &rating){ // 
+        auto it = (*local_map_list)[thread_id].find(item_index);
+        if (it == (*local_map_list)[thread_id].end()){ 
             std::unordered_map<int, std::pair<double, int>> new_entry{};
             std::pair<double, int> rating_and_update;
             rating_and_update.first = rating;
             rating_and_update.second = 0;
             new_entry.insert({user_index, rating_and_update});
-            local_map.insert({item_index, new_entry});
+            (*local_map_list)[thread_id].insert({item_index, new_entry});
         } else{
             std::unordered_map<int, std::pair<double, int>> old_entry = it->second;
             std::pair<double, int> rating_and_update;
@@ -81,33 +91,69 @@ RatingHashMap () : local_map({}){};
             it->second.insert({user_index, rating_and_update});
         }                  
     }
+
+
+    upcxx::future<> insert(const int &user_index, const int &item_index, const double &rating){ // 
+        std::pair<int, int> id_pairs = get_target_rank(user_index);
+        int machine_id = id_pairs.first;
+        int thread_id = id_pairs.second;
+        if(machine_id == upcxx::rank_me()){
+            upcxx::future<> empty_fut = upcxx::make_future();
+            insert_local(thread_id, user_index, item_index, rating);
+            return empty_fut;
+        } else{
+            return upcxx::rpc(machine_id, [](rating_map &l_map_list, const int &t_id, const int & user_idx, const int &item_idx, const double &rating) // 
+                    {
+                       auto it = (*l_map_list)[t_id].find(item_idx);
+                       if (it == (*l_map_list)[t_id].end()){ 
+                            std::unordered_map<int, std::pair<double, int>> new_entry{};
+                            std::pair<double, int> rating_and_update;
+                            rating_and_update.first = rating;
+                            rating_and_update.second = 0;
+                            new_entry.insert({user_idx, rating_and_update});
+                            (*l_map_list)[t_id].insert({item_idx, new_entry});
+                       } else{
+                            std::unordered_map<int, std::pair<double, int>> old_entry = it->second;
+                            std::pair<double, int> rating_and_update;
+                            rating_and_update.first = rating;
+                            rating_and_update.second = 0;
+                            it->second.insert({user_idx, rating_and_update});
+                       }                   
+                    }, local_map_list, thread_id, user_index, item_index, rating); // 
+        }
+                      
+    }
     void print_map(){
         int count = 0;
-        for(auto it:local_map){
-            for(auto it1:it.second){
-                count++;
+        for(int i=0; i<n_threads_per_machines; i++){
+            auto local_map = (*local_map_list)[i];
+            for(auto it:local_map){
+                for(auto it1:it.second){
+                    count++;
+                }
             }
         }
         cout << count << "\n";
     }
 
-    std::unordered_map<int, std::pair<double, int>> get_by_item(const int &item_index){
-        auto it = local_map.find(item_index);
-        if (it == local_map.end()){
+    std::unordered_map<int, std::pair<double, int>> get_by_item(const int &thread_id, const int &item_index){
+        auto local_map = (*local_map_list)[thread_id];
+        auto it = (*local_map_list)[thread_id].find(item_index);
+        if (it == (*local_map_list)[thread_id].end()){
             std::unordered_map<int, std::pair<double, int>> empty_entry{};
             return empty_entry;
         }
         return it->second;
     }
-    void increase_num_updates(const int &user_idx, const int &item_idx){
-        auto it = local_map.find(item_idx);
-        if (it == local_map.end()){    
+    void increase_num_updates(const int &thread_id, const int &user_idx, const int &item_idx){
+        auto it = (*local_map_list)[thread_id].find(item_idx);
+        if (it == (*local_map_list)[thread_id].end()){    
             cout << "[ERROR] DONE HAVE (" << user_idx << "," << item_idx << ")\n";
         } else{
             std::unordered_map<int, std::pair<double, int>> old_entry = it->second;
             auto it2 = it->second.find(user_idx);
             if (it2 == it->second.end()){
-                cout << "[ERROR] DONE HAVE-- (" << user_idx << "\n";
+                cout << "[ERROR] DONE HAVE-- (" << user_idx << ")\n";
             }else{
                 it2->second.second += 1; 
             }
@@ -145,12 +191,11 @@ int main(int argc, char **argv) {
     const int n_retries = 1; // number of circulating a (i, j) in a machine
     const double epsilon = 0.0000001; // stop threshold
     const int UNITS_PER_MSG = 100;
-    const int n_threads_per_machines = 3;
-    const int MAX_UPDATES = 100000; // Assume that this division is even
+    const int n_threads_per_machines = 2;
+    const int MAX_UPDATES = 300000; // Assume that this division is even
 
     std::thread *computing_threads[n_threads_per_machines];
     std::atomic<int> buffer_count(1);
-    std::atomic<bool> sending_signal(false);
     upcxx::dist_object<std::vector<std::vector<std::tuple<double, long, long>>>> distributed_losses({}); /// save <total loss and loss count>
     (*distributed_losses).resize(n_threads_per_machines);
     upcxx::dist_object<std::vector<int>> training_steps({});
@@ -169,16 +214,16 @@ int main(int argc, char **argv) {
     // char delimiter = ','; 
    
     //for ml-100k
-    // int m = 943;
-    // int n = 1682;
-    // int k = 20;
-    // char delimiter = '\t';
+    int m = 943;
+    int n = 1682;
+    int k = 20;
+    char delimiter = '\t';
 
     // for ml-10m
-    int m = 71567;
-    int n = 10681;
-    int k = 100;
-    char delimiter = ','; 
+    // int m = 71567;
+    // int n = 10681;
+    // int k = 100;
+    // char delimiter = ','; 
 
     int block_size = m/(upcxx::world().rank_n() * n_threads_per_machines);
     default_random_engine generator;
@@ -210,56 +255,56 @@ int main(int argc, char **argv) {
             local_perm_[i*n_threads_per_machines + j] = randomized_thread_id;
         }
     }
-    std::vector<RatingHashMap> A_list;
-    A_list.resize(n_threads_per_machines);
-    std::function<void(int)> read_dataset_func = [&](int thread_id)->void{
+    // Read rating matrix from dataset and save into a rating hash map
+    RatingHashMap A(n_threads_per_machines);
         /*
         Netflix: /home/hpcc/cloud/nomad/netflix_prize/netflix_data_  + ... + .txt
         ml-20m: /home/hpcc/cloud/nomad/ml-20m/ratings_ + ... + .txt (csv)
         ml-10m: /home/hpcc/cloud/nomad/ml-10m/ratings_ + ... + .txt
         ml-100k: /home/hpcc/cloud/nomad/ml-100k/u1_ + ... + .base
         */
-        const std::string train_dataset_path = "/home/hpcc/cloud/nomad/ml-10m/ratings_" + std::to_string(upcxx::rank_me() * n_threads_per_machines + thread_id) + ".txt";
-        fstream newfile;
-        newfile.open(train_dataset_path, ios::in); //open a file to perform read operation using file object
-        if (newfile.is_open()){ //checking whether the file is open
-            string tp;
-            while(getline(newfile, tp)){ //read data from file object and put it into string.
-                string line_tk;
-                int e_idx = 0;
-                std::stringstream stream_tp(tp);    
-                int user_index, item_index;
-                double rating;
-                while(getline(stream_tp, line_tk, delimiter)){
-                    switch (e_idx) {
-                        case 0:{
-                            user_index = stoi(line_tk) - 1;
-                            break; 
-                        } 
-                        case 1:{
-                            item_index = stoi(line_tk) - 1;
-                            break;
-                        }
-                        case 2:{
-                            // stoi for ml-10k, netflix, ml-10m, and stod for ml-20m
-                            rating = stoi(line_tk) * 1.0/5.0; 
-                            break;
-                        }   
-                        default:{
-                            break;
-                        }   
+    const std::string train_dataset_path = "/home/hpcc/cloud/nomad/ml-100k/u1_" + std::to_string(upcxx::rank_me()) + ".base";
+    fstream newfile;
+    newfile.open(train_dataset_path, ios::in); //open a file to perform read operation using file object
+    if (newfile.is_open()){ //checking whether the file is open
+        string tp;
+        while(getline(newfile, tp)){ //read data from file object and put it into string.
+            string line_tk;
+            int e_idx = 0;
+            std::stringstream stream_tp(tp);    
+            int user_index, item_index;
+            double rating;
+            while(getline(stream_tp, line_tk, delimiter)){
+                switch (e_idx) {
+                    case 0:{
+                        user_index = stoi(line_tk) - 1;
+                        break; 
+                    } 
+                    case 1:{
+                        item_index = stoi(line_tk) - 1;
+                        break;
                     }
-                    e_idx++;
+                    case 2:{
+                        // stoi for ml-10k, netflix, ml-10m, and stod for ml-20m
+                        rating = stoi(line_tk) * 1.0/5.0; 
+                        break;
+                    }   
+                    default:{
+                        break;
+                    }   
                 }
-                //4 for ml-10k, ml-20m and 
-                //3 for ml-10m and netflix
-                if (e_idx == 3){     
-                    A_list[thread_id].insert(user_index, item_index, rating);
-                }
+                e_idx++;
             }
-            newfile.close();
+            //4 for ml-10k, ml-20m and 
+            //3 for ml-10m and netflix
+            if (e_idx == 4){     
+                A.insert(user_index, item_index, rating).wait();
+            }
         }
-    };
+        newfile.close();
+    }
+    upcxx::barrier(); // Make sure all workers have read the dataset.
+    cout << "WORKER " << upcxx::rank_me() << " 'VE BEEN DONE READING DATASET...\n";
 
     std::function<void(int)> run_train_func = [&](int thread_id)->void { 
         // Initialize parameters
@@ -280,14 +325,14 @@ int main(int argc, char **argv) {
                 std::vector<double> h_j = item_info.values;   /// vector size: (k, 1)
                 int item_perm_index = item_info.perm_index;
 
-                std::unordered_map<int, std::pair<double, int>> Aj = A_list[thread_id].get_by_item(j);
+                std::unordered_map<int, std::pair<double, int>> Aj = A.get_by_item(thread_id, j);
                 double current_square_loss = 0.0;
                 long current_loss_count = 0;
                 for(auto it : Aj){
                     int i = it.first % block_size;   
                     double Aij = it.second.first; ////     scalar  
                     int t = it.second.second;
-                    A_list[thread_id].increase_num_updates(it.first, j);
+                    A.increase_num_updates(thread_id, it.first, j);
                     double step_size = learning_rate * 1.5 /
                             (1.0 + decay_rate * pow(t  + 1, 1.5)); // this is different from the source code of authors.
                         // note: have to index from global user_index (i) -> local user_index (i%block_size)
@@ -339,22 +384,12 @@ int main(int argc, char **argv) {
                     }
                     job_queues.push_local(next_q, column_data);
                 }
-                if(buffer_count % UNITS_PER_MSG == 0){             
-                    sending_signal = true;
-                }
+                
                 (*training_steps)[thread_id] = num_updates; 
             } 
         }
     };
-    for (int tid=0; tid<n_threads_per_machines; tid++) {
-        computing_threads[tid] = new thread(read_dataset_func, tid);
-    }
-    for (int tid=0; tid<n_threads_per_machines; tid++) {
-        computing_threads[tid]->join();
-    }
-
-    upcxx::barrier(); // Make sure all workers have read the dataset.
-    cout << "WORKER " << upcxx::rank_me() << " 'VE BEEN DONE READING DATASET...\n";
+    
     // Start the computing thread (run the training stage)
     for (int tid=0; tid<n_threads_per_machines; tid++) {
         computing_threads[tid] = new thread(run_train_func, tid);
@@ -364,7 +399,7 @@ int main(int argc, char **argv) {
     thread sending_thread( [&]() {
         while ((*stop_signal) == false){
             int n_pop_tries = 0;
-            while(sending_signal) { // training threads are waiting...
+            while(send_queue.unsafe_size() > UNITS_PER_MSG) { // training threads are waiting...
                 ColumnData item_info;
                 if(send_queue.try_pop(item_info)){
                     int retries = 0;
@@ -387,9 +422,6 @@ int main(int argc, char **argv) {
                     upcxx::progress();
                     n_pop_tries++;
                 }
-                if (n_pop_tries > 50){
-                    sending_signal = false;
-                }
             }
         }
     });
@@ -399,30 +431,40 @@ int main(int argc, char **argv) {
     thread receiving_thread( [&]() {
         upcxx::persona_scope scope(upcxx::master_persona());
         auto start = std::chrono::system_clock::now();
-        int delta_t = 5;
+        int delta_t = 1;
+        int previous_second = 0;
         while ((*stop_signal)==false){
             sched_yield();
             upcxx::progress();
             auto end = std::chrono::system_clock::now();
             std::chrono::duration<double> elapsed_seconds = end-start;
-            if (upcxx::rank_me() == 0 && (int) rint(elapsed_seconds.count()) % delta_t == 0){ // only check each 5 seconds
+            if (upcxx::rank_me() == 0 
+                && (int) rint(elapsed_seconds.count()) % delta_t == 0 
+                && previous_second != (int) rint(elapsed_seconds.count())
+            ){ // only check each 5 seconds
+                previous_second = (int) rint(elapsed_seconds.count());
                 // pull training_steps
                 int need_stop = true;
                 int current_steps = 0;
                 int the_lowest = 10000000;
-                for(int i=1; i<upcxx::rank_n(); i++){
-                    std::vector<int> pulled_training_steps = training_steps.fetch(i).wait();
-                    for(auto training_steps : pulled_training_steps){
-                        current_steps += training_steps;
-                        if(training_steps < MAX_UPDATES/(upcxx::rank_n() * n_threads_per_machines)){
+                std::pair<int, int> lowest_worker_ids = make_pair(0, 0);
+                std::vector<int> tmp = (*training_steps);
+                for(int i=0; i<upcxx::rank_n(); i++){
+                    if (i >=1) tmp = training_steps.fetch(i).wait();
+                    int tid = 0;
+                    for(auto training_step : tmp){
+                        current_steps += training_step;
+                        if(training_step < MAX_UPDATES/(upcxx::rank_n() * n_threads_per_machines)){
                             need_stop = false;
-                            the_lowest = min(the_lowest, training_steps);
+                            the_lowest = min(the_lowest, training_step);
+                            lowest_worker_ids.first = i;
+                            lowest_worker_ids.second = tid;
                         }
+                        tid++;
                     }
                 }
                 if (current_steps < MAX_UPDATES){
                     cout << "Training step: [" << current_steps << "/" << MAX_UPDATES << "]\n";
-                    cout.flush();
                 }
                 if (need_stop){
                     (*stop_signal) = true;
@@ -434,13 +476,11 @@ int main(int argc, char **argv) {
                 } else{
                     if(current_steps > MAX_UPDATES){
                         double percentage = the_lowest * 100.0 /(MAX_UPDATES/(upcxx::rank_n()*n_threads_per_machines));
-                        cout << "Waiting for the slowest worker loading " << percentage << "%...\n";
-                        cout.flush();
-                        delta_t = 20;
+                        cout << "Waiting for the slowest worker is " << lowest_worker_ids.first << " at thread: " << lowest_worker_ids.second << " loading " << percentage << "%...\n";
+                        delta_t = 10;
                     } 
                 }
             }
-
         }
     });
             
