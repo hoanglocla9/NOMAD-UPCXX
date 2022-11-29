@@ -191,7 +191,7 @@ int main(int argc, char **argv) {
     const int n_retries = 1; // number of circulating a (i, j) in a machine
     const double epsilon = 0.0000001; // stop threshold
     const int UNITS_PER_MSG = 100;
-    const int n_threads_per_machines = 2;
+    const int n_threads_per_machines = 12;
     const int MAX_UPDATES = 300000; // Assume that this division is even
 
     std::thread *computing_threads[n_threads_per_machines];
@@ -214,16 +214,16 @@ int main(int argc, char **argv) {
     // char delimiter = ','; 
    
     //for ml-100k
-    int m = 943;
-    int n = 1682;
-    int k = 20;
-    char delimiter = '\t';
+    // int m = 943;
+    // int n = 1682;
+    // int k = 20;
+    // char delimiter = '\t';
 
     // for ml-10m
-    // int m = 71567;
-    // int n = 10681;
-    // int k = 100;
-    // char delimiter = ','; 
+    int m = 71567;
+    int n = 10681;
+    int k = 100;
+    char delimiter = ','; 
 
     int block_size = m/(upcxx::world().rank_n() * n_threads_per_machines);
     default_random_engine generator;
@@ -263,7 +263,7 @@ int main(int argc, char **argv) {
         ml-10m: /home/hpcc/cloud/nomad/ml-10m/ratings_ + ... + .txt
         ml-100k: /home/hpcc/cloud/nomad/ml-100k/u1_ + ... + .base
         */
-    const std::string train_dataset_path = "/home/hpcc/cloud/nomad/ml-100k/u1_" + std::to_string(upcxx::rank_me()) + ".base";
+    const std::string train_dataset_path = "/home/picarib/Projects/NOMAD-UPCXX/dataset/ml-10M/ratings_" + std::to_string(upcxx::rank_me());
     fstream newfile;
     newfile.open(train_dataset_path, ios::in); //open a file to perform read operation using file object
     if (newfile.is_open()){ //checking whether the file is open

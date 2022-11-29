@@ -188,7 +188,7 @@
 
         // const std::string train_dataset_path = "/home/hpcc/cloud/nomad/netflix_prize/netflix_data_" + std::to_string(upcxx::rank_me()) + ".txt";
     //    const std::string train_dataset_path = "/home/hpcc/cloud/nomad/ml-20m/ratings_" + std::to_string(upcxx::rank_me()) + ".csv";
-       const std::string train_dataset_path = "/home/hpcc/cloud/nomad/ml-100k/u1_" + std::to_string(upcxx::rank_me()) + ".base";
+       const std::string train_dataset_path = "/home/picarib/Projects/NOMAD-UPCXX/dataset/ml-100k/u1_" + std::to_string(upcxx::rank_me());
         // const std::string train_dataset_path = "/home/hpcc/cloud/nomad/ml-10m/ratings_" + std::to_string(upcxx::rank_me()) + ".txt";
 
       //  const std::string train_dataset_path = "/home/picarib/Downloads/NOMAD-UPCXX/ml-20m/ratings_" + std::to_string(upcxx::rank_me()) + ".csv";
@@ -276,9 +276,9 @@
         }
         upcxx::barrier();
 
-        // if(upcxx::rank_me() == 0){
-        //     A.print_map();
-        // }
+        if(upcxx::rank_me() == 0){
+            A.print_map();
+        }
         
         // Init for permature at local node
         upcxx::global_ptr<double> perm_; 
@@ -413,7 +413,7 @@
         } else{
             cout << "ROOT NODE IS PULLING LOSSES.....\n";
             while (true){
-                sleep(10);
+                sleep(1);
                 int t = 0;
                 for(int i=1; i<upcxx::rank_n(); i++){
                     int tmp_t = training_steps.fetch(i).wait();
